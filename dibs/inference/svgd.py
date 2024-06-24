@@ -726,10 +726,10 @@ class JointDiBS(DiBS):
     def _svgd_loop(self, start, n_steps, init):
         return jax.lax.fori_loop(start, start + n_steps, lambda i, args: self._svgd_step(i, *args), init)
 
-
-    def sample(self, *, key, n_particles, steps, n_dim_particles=None, callback=None, callback_every=None,init_model=True, opt_state_z=None, opt_state_theta=None, sf_baseline=None):
+    
+    def sample(self, *, key, n_particles, steps, n_dim_particles=None, callback=None, callback_every=None, init_model=True, init_z=None, init_theta=None, sf_baseline=None):
         """
-        NOTE: compared to the original code, this has been updated to (1) also return the latent variable z; (2) allow further SVGD updates to an existing model (i.e., for fine-tuning), without having to reinitialise the optimisers and score function
+        NOTE: compared to the original code, this has been updated to (1) also return the latent variable z; (2) allow further SVGD updates to an existing model (i.e., for fine-tuning), without having to randomly initialize the particles and score function
 
         Use SVGD with DiBS to sample ``n_particles`` particles :math:`(G, \\Theta)` from the joint posterior
         :math:`p(G, \\Theta | D)` as defined by the BN model ``self.likelihood_model``
@@ -743,15 +743,19 @@ class JointDiBS(DiBS):
             callback: function to be called every ``callback_every`` steps of SVGD.
             callback_every: if ``None``, ``callback`` is only called after particle updates have finished
             init_model (bool): if True, samples random particles to initialise SVGD, otherwise uses given inputs
+            init_z: initialization for z particles (overrides random initialization if init_model=False)
+            init_theta: initialization for theta particles (overrides random initialization if init_model=False)
+            sf_baseline: initialization for score function baseline (overrides random initialization if init_model=False)
 
         Returns:
             tuple of shape (``[n_particles, n_vars, n_vars]``, ``PyTree``) where ``PyTree`` has leading dimension ``n_particles``:
             batch of samples :math:`G, \\Theta \\sim p(G, \\Theta | D)`
 
         """
+        key, subk = random.split(key)
+
         if init_model:
             # randomly sample initial particles
-            key, subk = random.split(key)
             init_z, init_theta = self._sample_initial_random_particles(key=subk, n_particles=n_particles,
                                                                     n_dim=n_dim_particles)
 
@@ -759,14 +763,16 @@ class JointDiBS(DiBS):
             n_particles, _, n_dim, _ = init_z.shape
             sf_baseline = jnp.zeros(n_particles)
 
-            if self.latent_prior_std is None:
-                self.latent_prior_std = 1.0 / jnp.sqrt(n_dim)
+        n_particles, _, n_dim, _ = init_z.shape
 
-            # maintain updated particles with optimizer state
-            opt_init, self.opt_update, get_params = self.opt
-            self.get_params = jit(get_params)
-            opt_state_z = opt_init(init_z)
-            opt_state_theta = opt_init(init_theta)
+        if self.latent_prior_std is None:
+            self.latent_prior_std = 1.0 / jnp.sqrt(n_dim)
+
+        # maintain updated particles with optimizer state
+        opt_init, self.opt_update, get_params = self.opt
+        self.get_params = jit(get_params)
+        opt_state_z = opt_init(init_z)
+        opt_state_theta = opt_init(init_theta)
 
         """Execute particle update steps for all particles in parallel using `vmap` functions"""
         # faster if for-loop is functionally pure and compiled, so only interrupt for callback
@@ -795,8 +801,7 @@ class JointDiBS(DiBS):
 
         # as alpha is large, we can convert the latents Z to their corresponding graphs G
         g_final = self.particle_to_g_lim(z_final)
-        if init_model: return g_final, theta_final, z_final, opt_state_z, opt_state_theta, key, sf_baseline
-        else: return g_final, theta_final, z_final
+        return g_final, theta_final, z_final, sf_baseline
 
 
     def get_empirical(self, g, theta):
